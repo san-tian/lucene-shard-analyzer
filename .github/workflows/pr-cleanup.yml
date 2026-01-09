@@ -1,0 +1,32 @@
+name: basic-pr-cleanup
+
+on:
+  pull_request:
+    types: [closed]
+
+permissions:
+  contents: read
+
+jobs:
+  cleanup-preview:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set Environment Variables
+        run: |
+          echo "NAMESPACE=pr-${{ github.event.number }}" >> $GITHUB_ENV
+
+      # 1. 模拟设置 K8s 上下文
+      - name: Setup Kubernetes (Simulation)
+        uses: helm/kind-action@v1
+        with:
+          cluster_name: staging-cluster
+
+      # 2. 删除对应的 Namespace
+      - name: Delete Ephemeral Namespace
+        run: |
+          echo "Deleting namespace $NAMESPACE..."
+          # ignore-not-found 防止因为环境不存在而报错
+          kubectl delete namespace $NAMESPACE --ignore-not-found=true
+          
+      - name: Log Cleanup
+        run: echo "Successfully cleaned up environment for PR #${{ github.event.number }}"

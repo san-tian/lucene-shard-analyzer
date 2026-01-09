@@ -1,0 +1,110 @@
+name: basic-pr-preview
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  packages: write
+  pull-requests: write # For commenting on the PR
+
+jobs:
+  deploy-preview:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # 1. 设置环境变量
+      - name: Set Environment Variables
+        run: |
+          echo "PR_NUMBER=${{ github.event.number }}" >> $GITHUB_ENV
+          echo "NAMESPACE=pr-${{ github.event.number }}" >> $GITHUB_ENV
+          echo "IMAGE_TAG=pr-${{ github.event.number }}-$(git rev-parse --short HEAD)" >> $GITHUB_ENV
+          echo "PREVIEW_URL=http://pr-${{ github.event.number }}.staging.example.com" >> $GITHUB_ENV
+
+      # 2. 构建镜像 (为这个特定的 PR 构建)
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and Push PR Image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: ghcr.io/${{ github.repository }}:${{ env.IMAGE_TAG }}
+          build-args: |
+             APP_VERSION=pr-${{ github.event.number }}
+             GIT_SHA=${{ github.sha }}
+
+      # 3. 设置 Kubernetes 工具 (这里假设使用 Kind 或连接到 Staging 集群)
+      # 在真实场景中，这里会是 `azure/k8s-set-context` 或类似步骤
+      - name: Setup Kubernetes (Simulation)
+        uses: helm/kind-action@v1
+        with:
+          cluster_name: staging-cluster # Simulating a shared staging cluster
+
+      # 4. 部署到临时 Namespace
+      - name: Deploy to Ephemeral Namespace
+        run: |
+          # 创建 Namespace (如果不存在)
+          kubectl create namespace $NAMESPACE --dry-run=client -o yaml | kubectl apply -f -
+          
+          # 创建 Image Pull Secret
+          kubectl create secret docker-registry ghcr-secret \
+            --namespace $NAMESPACE \
+            --docker-server=ghcr.io \
+            --docker-username=${{ github.actor }} \
+            --docker-password=${{ secrets.GITHUB_TOKEN }} \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+          # 替换 Deployment 中的镜像为刚刚构建的 PR 版本
+          # 注意：使用 envsubst 或 sed 进行简单的模板替换
+          sed "s|ghcr.io/san-tian/lucene-shard-analyzer:latest|ghcr.io/${{ github.repository }}:${{ env.IMAGE_TAG }}|g" k8s/deployment.yaml > k8s/deployment-pr.yaml
+          
+          # 确保 Deployment 加上了 imagePullSecrets (如果模板里没有默认带上)
+          # (我们在 Task 2 中已经加了 imagePullSecrets，所以这里只需要确保它指向正确的 secret)
+          
+          # 应用资源到指定 Namespace
+          kubectl apply -f k8s/deployment-pr.yaml -n $NAMESPACE
+          kubectl apply -f k8s/service.yaml -n $NAMESPACE
+          
+      # 5. 配置 Ingress 路由
+      - name: Configure Ingress
+        run: |
+          # 替换 Host 占位符
+          sed "s|PR_HOST_PLACEHOLDER|pr-${{ env.PR_NUMBER }}.staging.example.com|g" k8s/preview-ingress-template.yaml > k8s/ingress-pr.yaml
+          
+          # 应用 Ingress
+          kubectl apply -f k8s/ingress-pr.yaml -n $NAMESPACE
+
+      # 6. 等待就绪
+      - name: Wait for Rollout
+        run: |
+          kubectl rollout status deployment/lucene-shard-analyzer -n $NAMESPACE --timeout=120s
+
+      # 7. (可选) 运行针对该 PR 环境的集成测试
+      - name: Run Smoke Tests against Preview
+        run: |
+          # 在真实场景中，我们会通过 Ingress URL 访问，这里演示使用 Port-forward 或 Service URL
+          # USE_K8S_EXEC=true bash test/integration-test.sh
+          echo "Running smoke tests against $NAMESPACE..."
+          
+      # 8. 回复 PR 告知部署地址
+      - name: Comment on PR
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const url = process.env.PREVIEW_URL;
+            github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: `🚀 **Preview Environment Deployed!**\n\nAccess your changes here: [${url}](${url})\n\nNamespace: \`pr-${context.issue.number}\``
+            })
