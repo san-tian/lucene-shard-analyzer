@@ -1,0 +1,44 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: lucene-shard-analyzer
+  labels:
+    app: lucene-shard-analyzer
+spec:
+  replicas: 3  # 多实例部署，满足 Task 2 要求
+  selector:
+    matchLabels:
+      app: lucene-shard-analyzer
+  template:
+    metadata:
+      labels:
+        app: lucene-shard-analyzer
+    spec:
+      containers:
+        - name: lucene-shard-analyzer
+          image: ghcr.io/san-tian/lucene-shard-analyzer:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8080
+          env:
+            - name: APP_VERSION
+              value: "latest"
+          resources: # 资源限制（防止 Pod 占用过多资源）
+            requests:
+              memory: "256Mi"
+              cpu: "100m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"
+          readinessProbe: # 就绪探针：告诉 K8s 什么时候 Pod 可以接收流量
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 5
+          livenessProbe:  # 存活探针：告诉 K8s 什么时候 Pod 挂了需要重启
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 15
+            periodSeconds: 10

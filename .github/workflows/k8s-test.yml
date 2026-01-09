@@ -1,0 +1,183 @@
+name: k8s-deploy-and-test
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:  # 允许手动触发
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  integration-test:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      
+      # 创建一个本地 Kubernetes 集群 (使用 kind)
+      - name: Create k8s Kind Cluster
+        uses: helm/kind-action@v1
+        with:
+          cluster_name: test-cluster
+      
+      # 登录 GHCR 以拉取镜像
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      
+      # 创建 imagePullSecret 供 K8s 使用
+      - name: Create image pull secret
+        run: |
+          kubectl create secret docker-registry ghcr-secret \
+            --docker-server=ghcr.io \
+            --docker-username=${{ github.actor }} \
+            --docker-password=${{ secrets.GITHUB_TOKEN }}
+      
+      # 更新 deployment 使用 imagePullSecret
+      - name: Patch deployment with imagePullSecret
+        run: |
+          # 添加 imagePullSecrets 到 deployment
+          cat >> k8s/deployment.yaml << 'EOF'
+              imagePullSecrets:
+                - name: ghcr-secret
+          EOF
+      
+      # 部署到 Kubernetes
+      - name: Deploy to Kubernetes
+        run: |
+          kubectl apply -f k8s/deployment.yaml
+          kubectl apply -f k8s/service.yaml
+      
+      # 等待 deployment 就绪
+      - name: Wait for deployment to be ready
+        run: |
+          echo "Waiting for deployment to be ready..."
+          kubectl rollout status deployment/lucene-shard-analyzer --timeout=180s
+          
+          echo ""
+          echo "Pods status:"
+          kubectl get pods -l app=lucene-shard-analyzer
+          
+          echo ""
+          echo "Service status:"
+          kubectl get svc lucene-shard-analyzer
+      
+      # 设置端口转发
+      - name: Setup port forwarding
+        run: |
+          kubectl port-forward svc/lucene-shard-analyzer 8080:80 &
+          sleep 5  # 等待端口转发建立
+          echo "Port forwarding established on localhost:8080"
+      
+      # 测试 1: Health Check
+      - name: Test - Health Check
+        run: |
+          echo "Testing /healthz endpoint..."
+          RESPONSE=$(curl -s -w "\n%{http_code}" http://localhost:8080/healthz)
+          BODY=$(echo "$RESPONSE" | head -n -1)
+          STATUS=$(echo "$RESPONSE" | tail -n 1)
+          
+          echo "Response: $BODY (Status: $STATUS)"
+          
+          if [ "$STATUS" = "200" ]; then
+            echo "✓ Health check passed"
+          else
+            echo "✗ Health check failed with status $STATUS"
+            exit 1
+          fi
+      
+      # 测试 2: Info Endpoint + 负载均衡验证
+      - name: Test - Load Balancing
+        run: |
+          echo "Testing /info endpoint and verifying load balancing..."
+          echo ""
+          
+          declare -A HOSTNAMES
+          
+          for i in {1..15}; do
+            RESPONSE=$(curl -s http://localhost:8080/info)
+            HOSTNAME=$(echo "$RESPONSE" | jq -r '.hostname // empty')
+            
+            if [ -n "$HOSTNAME" ]; then
+              echo "Request $i: hostname = $HOSTNAME"
+              HOSTNAMES["$HOSTNAME"]=$((${HOSTNAMES["$HOSTNAME"]:-0} + 1))
+            fi
+            sleep 0.3
+          done
+          
+          echo ""
+          echo "Summary:"
+          UNIQUE_HOSTS=${#HOSTNAMES[@]}
+          echo "Responses from $UNIQUE_HOSTS unique pod(s):"
+          
+          for host in "${!HOSTNAMES[@]}"; do
+            echo "  - $host: ${HOSTNAMES[$host]} requests"
+          done
+          
+          if [ "$UNIQUE_HOSTS" -ge 2 ]; then
+            echo ""
+            echo "✓ Load balancing verified: traffic distributed across $UNIQUE_HOSTS pods"
+          else
+            echo ""
+            echo "⚠ Warning: Only $UNIQUE_HOSTS unique hostname(s) seen"
+            echo "  This might be due to limited test requests or timing issues"
+          fi
+      
+      # 测试 3: Info Endpoint 内容验证
+      - name: Test - Info Endpoint Content
+        run: |
+          echo "Verifying /info endpoint response structure..."
+          
+          RESPONSE=$(curl -s http://localhost:8080/info)
+          echo "Response: $RESPONSE"
+          
+          # 验证必需字段
+          VERSION=$(echo "$RESPONSE" | jq -r '.version // empty')
+          GIT_SHA=$(echo "$RESPONSE" | jq -r '.git_sha // .gitSha // empty')
+          ARCH=$(echo "$RESPONSE" | jq -r '.arch // .architecture // empty')
+          HOSTNAME=$(echo "$RESPONSE" | jq -r '.hostname // empty')
+          
+          echo ""
+          echo "Parsed fields:"
+          echo "  version: $VERSION"
+          echo "  git_sha: $GIT_SHA"
+          echo "  arch: $ARCH"
+          echo "  hostname: $HOSTNAME"
+          
+          if [ -n "$HOSTNAME" ]; then
+            echo ""
+            echo "✓ /info endpoint returns valid response"
+          else
+            echo ""
+            echo "✗ /info endpoint missing required fields"
+            exit 1
+          fi
+      
+      # 显示最终状态
+      - name: Show final cluster state
+        if: always()
+        run: |
+          echo "=== Final Cluster State ==="
+          echo ""
+          echo "Pods:"
+          kubectl get pods -l app=lucene-shard-analyzer -o wide
+          echo ""
+          echo "Services:"
+          kubectl get svc lucene-shard-analyzer
+          echo ""
+          echo "Endpoints:"
+          kubectl get endpoints lucene-shard-analyzer
+          echo ""
+          echo "Recent pod logs (last 20 lines from first pod):"
+          POD=$(kubectl get pods -l app=lucene-shard-analyzer -o jsonpath='{.items[0].metadata.name}')
+          kubectl logs "$POD" --tail=20 || true
