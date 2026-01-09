@@ -53,6 +53,23 @@ This prototype uses **real production logic** for resource manipulation but simu
 *   **Real Logic**: The commands to dynamically create namespaces, generate secrets, replace image tags, and configure Ingress are ensuring functionality.
 *   **Simulated Connection**: The CI workflow uses `helm/kind-action` (or assumes a cluster connection step) as a placeholder. In a real production environment, this would be replaced with `azure/k8s-set-context` or `aws-actions/configure-aws-credentials` to connect to the actual Shared Staging Cluster.
 
+### Advanced Considerations: Microservice Dependencies
+While this project is a single service, we designed the architecture to scale for complex microservice dependencies (e.g., Service A ↔ Service B).
+
+#### Scenario 1: Forward Dependency (A depends on B)
+*   **Context**: PR is for Service A. It needs to call Service B.
+*   **Solution**: **Baseline Sharing**.
+    *   We do *not* deploy a copy of B in the PR environment (to save resources).
+    *   We configure Service A (via `ExternalName` or ConfigMap) to route traffic to `service-b.staging.svc`.
+
+#### Scenario 2: Backward Dependency (B depends on A)
+*   **Context**: PR is for Service A. Service B (running in Staging) calls A.
+*   **Challenge**: How does the shared Service B know to call `A(PR-1)` for my request, but `A(PR-2)` for my colleague's?
+*   **Solution**: **Header Propagation & Smart Routing (Service Mesh)**.
+    1.  **Tagging**: Testing requests carry a header: `x-route: pr-1`.
+    2.  **Propagation**: Service B must be coded to forward this header when it calls A.
+    3.  **Routing**: A Kubernetes Service Mesh (e.g., Istio) intercepts the call from B. If it sees `x-route: pr-1`, it dynamically routes the request to the `A` in the `pr-1` namespace; otherwise, it falls back to `staging`.
+
 ---
 
 ## 📖 Operational Guide & Manual Verification
