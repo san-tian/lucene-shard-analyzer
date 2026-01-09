@@ -14,6 +14,8 @@ spec:
       labels:
         app: lucene-shard-analyzer
     spec:
+      imagePullSecrets:
+        - name: ghcr-secret
       containers:
         - name: lucene-shard-analyzer
           image: ghcr.io/san-tian/lucene-shard-analyzer:latest
