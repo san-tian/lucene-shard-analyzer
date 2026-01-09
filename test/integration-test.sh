@@ -9,6 +9,7 @@ set -e
 
 BASE_URL="${BASE_URL:-http://localhost:8080}"
 SAMPLE_SHARD="${SAMPLE_SHARD:-shard.tar}"
+USE_K8S_EXEC="${USE_K8S_EXEC:-true}"
 
 echo "=========================================="
 echo "  Lucene Shard Analyzer Integration Test"
@@ -34,8 +35,8 @@ echo "▶ Test 1: Health Check (/healthz)"
 echo "------------------------------------------"
 
 HEALTH_RESPONSE=$(curl -s -w "\n%{http_code}" "$BASE_URL/healthz")
-HEALTH_BODY=$(echo "$HEALTH_RESPONSE" | head -n -1)
 HEALTH_STATUS=$(echo "$HEALTH_RESPONSE" | tail -n 1)
+HEALTH_BODY=$(echo "$HEALTH_RESPONSE" | sed '$d')
 
 if [ "$HEALTH_STATUS" = "200" ]; then
     pass "/healthz returned 200 OK"
@@ -50,24 +51,41 @@ fi
 echo ""
 echo "▶ Test 2: Load Balancing (/info)"
 echo "------------------------------------------"
+# 提示用户关于 port-forward 的限制
+if [[ "$BASE_URL" == *"localhost"* ]]; then
+    info "Note: Testing via localhost (port-forward) usually sticks to one Pod."
+    info "To see true K8s load balancing, set USE_K8S_EXEC=true"
+fi
 info "Calling /info 10 times to verify load balancing..."
 
-declare -A HOSTNAMES
+# Use a simple approach compatible with bash 3.x
+HOSTNAMES_FILE=$(mktemp)
 for i in {1..10}; do
-    INFO_RESPONSE=$(curl -s "$BASE_URL/info")
+    if [ "$USE_K8S_EXEC" = "true" ]; then
+        # 在集群内部通过 Service 名称访问，这会触发 K8s 的负载均衡机制
+        POD_NAME=$(kubectl get pods -l app=lucene-shard-analyzer -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
+        if [ -z "$POD_NAME" ]; then
+            fail "No Pods found to run internal test. Is the deployment ready?"
+        fi
+        INFO_RESPONSE=$(kubectl exec "$POD_NAME" -- wget -qO- http://lucene-shard-analyzer/info 2>/dev/null)
+    else
+        INFO_RESPONSE=$(curl -s "$BASE_URL/info")
+    fi
+    
     HOSTNAME=$(echo "$INFO_RESPONSE" | grep -o '"hostname":"[^"]*"' | cut -d'"' -f4)
     if [ -n "$HOSTNAME" ]; then
-        HOSTNAMES["$HOSTNAME"]=$((${HOSTNAMES["$HOSTNAME"]:-0} + 1))
+        echo "$HOSTNAME" >> "$HOSTNAMES_FILE"
     fi
     sleep 0.2
 done
 
-UNIQUE_HOSTS=${#HOSTNAMES[@]}
+UNIQUE_HOSTS=$(sort "$HOSTNAMES_FILE" | uniq | wc -l | tr -d ' ')
 echo ""
 info "Responses received from $UNIQUE_HOSTS unique pod(s):"
-for host in "${!HOSTNAMES[@]}"; do
-    echo "    - $host: ${HOSTNAMES[$host]} request(s)"
+sort "$HOSTNAMES_FILE" | uniq -c | while read count host; do
+    echo "    - $host: $count request(s)"
 done
+rm -f "$HOSTNAMES_FILE"
 
 if [ "$UNIQUE_HOSTS" -ge 2 ]; then
     pass "Load balancing verified: requests distributed across $UNIQUE_HOSTS pods"
@@ -94,8 +112,8 @@ else
         -F "file=@$SAMPLE_SHARD" \
         "$BASE_URL/analyze")
     
-    ANALYZE_BODY=$(echo "$ANALYZE_RESPONSE" | head -n -1)
     ANALYZE_STATUS=$(echo "$ANALYZE_RESPONSE" | tail -n 1)
+    ANALYZE_BODY=$(echo "$ANALYZE_RESPONSE" | sed '$d')
     
     if [ "$ANALYZE_STATUS" = "200" ]; then
         pass "/analyze returned 200 OK"
