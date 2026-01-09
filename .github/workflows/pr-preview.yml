@@ -66,7 +66,7 @@ jobs:
 
           # 替换 Deployment 中的镜像为刚刚构建的 PR 版本
           # 注意：使用 envsubst 或 sed 进行简单的模板替换
-          sed "s|ghcr.io/san-tian/lucene-shard-analyzer:latest|ghcr.io/${{ github.repository }}:${{ env.IMAGE_TAG }}|g" k8s/deployment.yaml > k8s/deployment-pr.yaml
+          sed "s|ghcr.io/san-tian/lucene-shard-analyzer:latest|ghcr.io/${{ github.repository }}:$IMAGE_TAG|g" k8s/deployment.yaml > k8s/deployment-pr.yaml
           
           # 确保 Deployment 加上了 imagePullSecrets (如果模板里没有默认带上)
           # (我们在 Task 2 中已经加了 imagePullSecrets，所以这里只需要确保它指向正确的 secret)
@@ -79,7 +79,7 @@ jobs:
       - name: Configure Ingress
         run: |
           # 替换 Host 占位符
-          sed "s|PR_HOST_PLACEHOLDER|pr-${{ env.PR_NUMBER }}.staging.example.com|g" k8s/preview-ingress-template.yaml > k8s/ingress-pr.yaml
+          sed "s|PR_HOST_PLACEHOLDER|pr-$PR_NUMBER.staging.example.com|g" k8s/preview-ingress-template.yaml > k8s/ingress-pr.yaml
           
           # 应用 Ingress
           kubectl apply -f k8s/ingress-pr.yaml -n $NAMESPACE
