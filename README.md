@@ -29,13 +29,13 @@ This repository contains the implementation for a DevOps Exercise Project, compl
 **Goal**: Design a safe way to test Pull Requests in a shared staging cluster.
 
 ### Solution: Ephemeral Preview Environments
-We implemented a **"Dynamic Namespace"** strategy where every PR gets its own isolated environment.
+To address the "Staging Bottleneck" where multiple developers block each other, we designed an **"Ephemeral Namespace"** strategy.
 
-| Component | Implementation Logic |
+| Component | Implementation Logic & Considerations |
 | :--- | :--- |
-| **Isolation** | Each PR creates a namespace `pr-<number>` (e.g., `pr-123`). All resources (Deployments, Services) are scoped to this namespace. |
-| **Routing** | Dynamic Ingress rules generate unique URLs: `http://pr-123.staging.example.com`. |
-| **Lifecycle** | Automated creation on PR Open/Update; Automated deletion on PR Close/Merge. |
+| **Isolation** | **Why**: Prevents config conflicts (e.g., different env vars). <br> **How**: Create a unique namespace `pr-<number>` for each PR. All deployments are scoped here. |
+| **Routing** | **Why**: Developers need to access *their* version, not the main staging one. <br> **How**: Dynamic Ingress with a unique Host header: `http://pr-123.staging.example.com`. |
+| **Lifecycle** | **Why**: To prevent resource leakage (cost/performance). <br> **How**: GitHub Actions triggers on `closed` to auto-delete the namespace. |
 
 ### Prototype Files
 1.  **Deploy Workflow** (`.github/workflows/pr-preview.yml`):
@@ -110,6 +110,11 @@ kubectl get svc lucene-shard-analyzer
 
 **Verification**
 ```bash
+# Option 1: Automated Integration Test (Recommended)
+# Automatically checks Health, Metadata, Load Balancing, and Shard Analysis
+bash test/integration-test.sh
+
+# Option 2: Manual Checks
 # Enable port-forwarding
 kubectl port-forward svc/lucene-shard-analyzer 8080:80 
 
