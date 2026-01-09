@@ -95,10 +95,10 @@ public class LuceneAnalyzerService {
         totalLiveDocs += liveDocs;
         totalSizeBytes += size;
         if (segmentVersion != null) {
-          if (minSegmentVersion == null || segmentVersion.compareTo(minSegmentVersion) < 0) {
+          if (minSegmentVersion == null || minSegmentVersion.onOrAfter(segmentVersion)) {
             minSegmentVersion = segmentVersion;
           }
-          if (maxSegmentVersion == null || segmentVersion.compareTo(maxSegmentVersion) > 0) {
+          if (maxSegmentVersion == null || segmentVersion.onOrAfter(maxSegmentVersion)) {
             maxSegmentVersion = segmentVersion;
           }
         }
